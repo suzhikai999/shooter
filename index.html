@@ -1,0 +1,582 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>2D射击小游戏</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { display: flex; justify-content: center; align-items: center; background: #111; flex-direction: column; }
+        canvas { background: #1a1a1d; border: 2px solid #444; }
+        .ui-container {
+            position: absolute;
+            bottom: 20px;
+            width: 1280px;
+            display: flex;
+            gap: 10px;
+            padding: 0 20px;
+        }
+        .bar-box {
+            flex: 1;
+            height: 20px;
+            background: #333;
+            border-radius: 5px;
+            overflow: hidden;
+            border: 1px solid #555;
+        }
+        .bar-fill {
+            height: 100%;
+            transition: width 0.05s linear;
+        }
+        .recovery { background: #4ade80; }
+        .charge { background: #fbbf24; }
+        .preroll { background: #ec4899; }
+
+        .menu {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.9);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            z-index: 999;
+            color: white;
+            font-family: Arial;
+        }
+        .menu h1 {
+            font-size: 60px;
+            margin-bottom: 40px;
+            color: #4fc3f7;
+            text-shadow: 0 0 10px #4fc3f7;
+        }
+        .menu button {
+            width: 280px;
+            height: 60px;
+            margin: 15px;
+            font-size: 24px;
+            background: #333;
+            color: white;
+            border: 2px solid #4fc3f7;
+            border-radius: 10px;
+            cursor: pointer;
+            transition: 0.2s;
+        }
+        .menu button:hover {
+            background: #4fc3f7;
+            color: #111;
+            transform: scale(1.05);
+        }
+        .mode-info {
+            position: absolute;
+            top: 10px;
+            left: 50%;
+            transform: translateX(-50%);
+            color: white;
+            font-size: 20px;
+            background: rgba(0,0,0,0.7);
+            padding: 8px 16px;
+            border-radius: 8px;
+            font-family: Arial;
+            z-index: 100;
+        }
+    </style>
+</head>
+<body>
+
+<div class="mode-info" id="modeText">等待开始游戏</div>
+<div class="menu" id="mainMenu">
+    <h1>2D射击小游戏</h1>
+    <button id="startNormal">正常模式（射击+近战）</button>
+    <button id="startMelee">纯近战模式（禁用射击）</button>
+</div>
+
+<canvas id="game"></canvas>
+<div class="ui-container">
+    <div class="bar-box">
+        <div class="bar-fill recovery" id="recoveryBar" style="width: 100%"></div>
+    </div>
+    <div class="bar-box">
+        <div class="bar-fill charge" id="chargeBar" style="width: 0%"></div>
+    </div>
+    <div class="bar-box">
+        <div class="bar-fill preroll" id="prerollBar" style="width: 0%"></div>
+    </div>
+</div>
+
+<script>
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+canvas.width = 1280;
+canvas.height = 720;
+
+const recoveryBar = document.getElementById('recoveryBar');
+const chargeBar = document.getElementById('chargeBar');
+const prerollBar = document.getElementById('prerollBar');
+const mainMenu = document.getElementById('mainMenu');
+const modeText = document.getElementById('modeText');
+
+const gameMode = {
+    isMeleeOnly: false,
+    gameStarted: false
+};
+
+const WORLD_WIDTH = 3000;
+const WORLD_HEIGHT = 3000;
+
+const player = {
+  x: WORLD_WIDTH / 2,
+  y: WORLD_HEIGHT / 2,
+  size: 25,
+  speed: 5,
+  color: '#4fc3f7',
+  dead: false,
+  gun: {
+    len: 55,
+    w: 10,
+    angle: 0,
+    swing: 0,
+    swingSpeed: 0.4
+  }
+};
+
+const melee = {
+  recovery: 100,
+  recoveryMax: 100,
+  recoverySpeed: 20,
+  
+  charge: 0,
+  chargeMax: 100,
+  chargeSpeed: 1.5,
+  
+  preroll: 0,
+  prerollMax: 5,
+  
+  isCharging: false,
+  isAttacking: false,
+  range: 120,
+  meleeOnlyRange: 40, // 纯近战模式攻击距离
+  baseDamage: 1,
+  bulletBreakChance: 0.7
+};
+
+let playerBullets = [];
+let enemyBullets = [];
+let enemies = [];
+let obstacles = [];
+
+const camera = {
+  x: 0,
+  y: 0,
+  smooth: 0.1
+};
+
+const keys = { w: false, a: false, s: false, d: false };
+let mouse = { x: 0, y: 0 };
+let isMouseLeftDown = false;
+let shootCooldown = 0;
+const SHOOT_DELAY = 8;
+let enemySpawnTimer = null;
+
+window.addEventListener('keydown', e => {
+  if (['w','a','s','d'].includes(e.key)) keys[e.key] = true;
+});
+window.addEventListener('keyup', e => {
+  if (['w','a','s','d'].includes(e.key)) keys[e.key] = false;
+});
+
+window.addEventListener('mousemove', e => {
+  const rect = canvas.getBoundingClientRect();
+  mouse.x = e.clientX - rect.left;
+  mouse.y = e.clientY - rect.top;
+  const dx = mouse.x - canvas.width/2;
+  const dy = mouse.y - canvas.height/2;
+  player.gun.angle = Math.atan2(dy, dx);
+});
+
+window.addEventListener('mousedown', (e) => {
+  if (player.dead || !gameMode.gameStarted) return;
+  if(e.button === 0) isMouseLeftDown = true;
+});
+window.addEventListener('mouseup', (e) => {
+  if(e.button === 0) isMouseLeftDown = false;
+});
+
+window.addEventListener('mousedown', (e) => {
+  if(e.button === 2 && !player.dead && melee.recovery >= melee.recoveryMax && !melee.isAttacking && gameMode.gameStarted) {
+    melee.isCharging = true;
+  }
+});
+window.addEventListener('mouseup', (e) => {
+  if(e.button === 2 && melee.isCharging) {
+    melee.isCharging = false;
+    melee.isAttacking = true;
+    player.gun.swing = -1.2;
+  }
+});
+window.addEventListener('contextmenu', e => e.preventDefault());
+
+document.getElementById('startNormal').addEventListener('click', () => {
+    startGame(false);
+});
+document.getElementById('startMelee').addEventListener('click', () => {
+    startGame(true);
+});
+
+function startGame(meleeOnly) {
+    gameMode.isMeleeOnly = meleeOnly;
+    gameMode.gameStarted = true;
+    mainMenu.style.display = 'none';
+    
+    player.dead = false;
+    player.x = WORLD_WIDTH/2;
+    player.y = WORLD_HEIGHT/2;
+    
+    enemies = [];
+    playerBullets = [];
+    enemyBullets = [];
+    
+    melee.recovery = 100;
+    melee.charge = 0;
+    
+    if(meleeOnly) {
+        modeText.textContent ="「纯近战模式」禁用射击 | 右键近战秒杀敌人 | 攻击距离提升";
+        modeText.style.color = '#ec4899';
+    } else {
+        modeText.textContent ="「正常模式」左键射击 | 右键近战";
+        modeText.style.color = '#4fc3f7';
+    }
+    
+    if(enemySpawnTimer) clearInterval(enemySpawnTimer);
+    enemySpawnTimer = setInterval(spawnEnemy, 1200);
+}
+
+function spawnObstacles(count = 90) {
+  for (let i = 0; i < count; i++) {
+    obstacles.push({
+      x: Math.random() * (WORLD_WIDTH - 80) + 40,
+      y: Math.random() * (WORLD_HEIGHT - 80) + 40,
+      w: 40 + Math.random() * 50,
+      h: 40 + Math.random() * 50,
+      color: '#6d6d79'
+    });
+  }
+}
+
+function spawnEnemy() {
+  if (player.dead || !gameMode.gameStarted || enemies.length >= 60) return;
+  let px = player.x;
+  let py = player.y;
+  let ex, ey;
+  do{
+    ex = Math.random() * WORLD_WIDTH;
+    ey = Math.random() * WORLD_HEIGHT;
+  }while(Math.hypot(ex-px, ey-py) < 400);
+  
+  enemies.push({
+    x: ex,
+    y: ey,
+    size: 22,
+    color: '#e91e63',
+    hp: 3,
+    shootTimer: 0,
+    shootInterval: 30
+  });
+}
+
+function updateMeleeUI() {
+  recoveryBar.style.width = Math.min(100, (melee.recovery / melee.recoveryMax * 100)) + '%';
+  chargeBar.style.width = Math.min(100, (melee.charge / melee.chargeMax * 100)) + '%';
+  prerollBar.style.width = Math.min(100, (melee.preroll / melee.prerollMax * 100)) + '%';
+}
+
+function handleMelee() {
+  if (player.dead || !gameMode.gameStarted) return;
+  
+  if (melee.recovery < melee.recoveryMax) {
+    melee.recovery += melee.recoverySpeed;
+  }
+  
+  if (melee.recovery >= melee.recoveryMax && !melee.isAttacking) {
+    melee.charge = Math.min(melee.charge + melee.chargeSpeed, melee.chargeMax);
+  }
+  
+  if (player.gun.swing !== 0) {
+    player.gun.swing += player.gun.swingSpeed;
+    if (player.gun.swing > 0) player.gun.swing = 0;
+  }
+  
+  if (melee.isAttacking) {
+    melee.preroll += 2;
+    if (melee.preroll >= melee.prerollMax) {
+      dealMeleeDamage();
+      breakEnemyBullets();
+      melee.isAttacking = false;
+      melee.preroll = 0;
+      melee.recovery = 0;
+      melee.charge = 0;
+      player.gun.swing = 0;
+    }
+  }
+}
+
+function breakEnemyBullets() {
+  // 纯近战模式下敌人不发射子弹，无需清除
+  if (gameMode.isMeleeOnly) return;
+  
+  for (let i = enemyBullets.length - 1; i >= 0; i--) {
+    const bullet = enemyBullets[i];
+    const dist = Math.hypot(player.x - bullet.x, player.y - bullet.y);
+    if (dist < melee.range) {
+      enemyBullets.splice(i, 1);
+    }
+  }
+}
+
+function dealMeleeDamage() {
+  const damage = gameMode.isMeleeOnly ? 999 : melee.baseDamage + Math.floor(melee.charge / 70);
+  // 根据模式切换攻击距离
+  const currentRange = gameMode.isMeleeOnly ? melee.meleeOnlyRange : melee.range;
+  
+  for(let i = enemies.length - 1; i >= 0; i--) {
+    const enemy = enemies[i];
+    const dist = Math.hypot(player.x - enemy.x, player.y - enemy.y);
+    if (dist < currentRange + enemy.size) {
+      enemy.hp -= damage;
+      if (enemy.hp <= 0) enemies.splice(i, 1);
+    }
+  }
+}
+
+function renderMeleeRange() {
+  if ((melee.isCharging || melee.isAttacking) && !player.dead) {
+    const currentRange = gameMode.isMeleeOnly ? melee.meleeOnlyRange : melee.range;
+    
+    ctx.save();
+    ctx.translate(-camera.x, -camera.y);
+    ctx.beginPath();
+    ctx.arc(player.x, player.y, currentRange, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(255,100,100,0.5)';
+    ctx.lineWidth = 3;
+    ctx.stroke();
+    ctx.restore();
+  }
+}
+
+function renderGun() {
+  if (player.dead || !gameMode.gameStarted) return;
+  ctx.save();
+  ctx.translate(-camera.x, -camera.y);
+  ctx.translate(player.x, player.y);
+  let ang = player.gun.angle + player.gun.swing;
+  ctx.rotate(ang);
+  ctx.fillStyle = '#333';
+  ctx.fillRect(0, -player.gun.w/2, player.gun.len, player.gun.w);
+  ctx.fillStyle = '#552222';
+  ctx.fillRect(-12, -player.gun.w/2-2, 14, player.gun.w+4);
+  ctx.fillStyle = '#ddd';
+  ctx.fillRect(player.gun.len-6, -player.gun.w/2-1, 6, player.gun.w+2);
+  ctx.restore();
+}
+
+function bulletHitObstacle(bx, by) {
+  for(let o of obstacles){
+    if(bx > o.x && bx < o.x+o.w && by > o.y && by < o.y+o.h){
+      return true;
+    }
+  }
+  return false;
+}
+
+function playerShoot() {
+  if (shootCooldown > 0 || player.dead || gameMode.isMeleeOnly || !gameMode.gameStarted) return;
+  shootCooldown = SHOOT_DELAY;
+  const gunTipX = player.x + Math.cos(player.gun.angle) * player.gun.len;
+  const gunTipY = player.y + Math.sin(player.gun.angle) * player.gun.len;
+  playerBullets.push({
+    x: gunTipX,
+    y: gunTipY,
+    vx: Math.cos(player.gun.angle) * 10,
+    vy: Math.sin(player.gun.angle) * 10,
+    size: 6,
+    color: '#ff9800'
+  });
+  melee.recovery = 0;
+}
+
+function enemyShoot(enemy) {
+  if(player.dead || !gameMode.gameStarted) return;
+  let aimAng = Math.atan2(player.y - enemy.y, player.x - enemy.x);
+  aimAng += (Math.random() - 0.5) * 0.2;
+  enemyBullets.push({
+    x: enemy.x,
+    y: enemy.y,
+    vx: Math.cos(aimAng) * 5,
+    vy: Math.sin(aimAng) * 5,
+    size: 5,
+    color: '#ff9800'
+  });
+}
+
+function updateBullets() {
+  if(!gameMode.gameStarted || player.dead) return;
+  
+  for(let i = playerBullets.length - 1; i >= 0; i--){
+    let b = playerBullets[i];
+    b.x += b.vx;
+    b.y += b.vy;
+    if(b.x < 0 || b.x > WORLD_WIDTH || b.y < 0 || b.y > WORLD_HEIGHT || bulletHitObstacle(b.x,b.y)){
+      playerBullets.splice(i,1);
+    }
+  }
+  
+  for(let i = enemyBullets.length - 1; i >= 0; i--){
+    let b = enemyBullets[i];
+    b.x += b.vx;
+    b.y += b.vy;
+    if(b.x < 0 || b.x > WORLD_WIDTH || b.y < 0 || b.y > WORLD_HEIGHT || bulletHitObstacle(b.x,b.y)){
+      enemyBullets.splice(i,1);
+      continue;
+    }
+    let dis = Math.hypot(b.x-player.x,b.y-player.y);
+    if(dis < player.size + b.size){
+      player.dead = true;
+      enemyBullets.splice(i,1);
+    }
+  }
+}
+
+function update() {
+  if (!gameMode.gameStarted) return;
+  if (player.dead) {
+    ctx.fillStyle = '#ff4444';
+    ctx.font = '60px Arial';
+    ctx.textAlign = 'center';
+    ctx.fillText('你挂了', canvas.width/2, canvas.height/2);
+    if(enemySpawnTimer) clearInterval(enemySpawnTimer);
+    return;
+  }
+
+  if(shootCooldown > 0) shootCooldown--;
+  if(isMouseLeftDown) playerShoot();
+
+  handleMelee();
+  updateMeleeUI();
+  updateBullets();
+
+  let moveX = 0, moveY = 0;
+  if (keys.w) moveY -= 1;
+  if (keys.s) moveY += 1;
+  if (keys.a) moveX -= 1;
+  if (keys.d) moveX += 1;
+  const len = Math.hypot(moveX, moveY);
+  if(len > 0){
+      moveX /= len;
+      moveY /= len;
+  }
+  player.x += moveX * player.speed;
+  player.y += moveY * player.speed;
+
+  player.x = Math.max(player.size, Math.min(WORLD_WIDTH - player.size, player.x));
+  player.y = Math.max(player.size, Math.min(WORLD_HEIGHT - player.size, player.y));
+
+  obstacles.forEach(obs => {
+    const cx = obs.x + obs.w/2;
+    const cy = obs.y + obs.h/2;
+    const dx = player.x - cx;
+    const dy = player.y - cy;
+    const dist = Math.hypot(dx, dy);
+    const minDist = player.size + Math.min(obs.w, obs.h)/2 + 5;
+    if(dist < minDist && dist > 0){
+      const push = (minDist - dist) * 0.3;
+      player.x += dx / dist * push;
+      player.y += dy / dist * push;
+    }
+  });
+
+  for(let i = enemies.length - 1; i >= 0; i--){
+    let e = enemies[i];
+    let dx = player.x - e.x;
+    let dy = player.y - e.y;
+    let len = Math.hypot(dx,dy);
+    if(len < 1) len = 1;
+    let moveX = dx/len, moveY = dy/len;
+    
+    obstacles.forEach(obs=>{
+      const ox = obs.x + obs.w/2 - e.x;
+      const oy = obs.y + obs.h/2 - e.y;
+      const od = Math.hypot(ox, oy);
+      if(od < 1) return;
+      const avoid = Math.max(0, 100 - od) * 0.05;
+      moveX -= ox/od * avoid;
+      moveY -= oy/od * avoid;
+    });
+    
+    const mlen = Math.hypot(moveX, moveY);
+    if(mlen > 0){
+        moveX /= mlen;
+        moveY /= mlen;
+    }
+    e.x += moveX * 2.5;
+    e.y += moveY * 2.5;
+
+    if(Math.hypot(e.x-player.x,e.y-player.y) < e.size+player.size) player.dead=true;
+
+    // 纯近战模式：敌人禁止射击
+    if (!gameMode.isMeleeOnly) {
+      e.shootTimer++;
+      if(e.shootTimer >= e.shootInterval){
+        enemyShoot(e);
+        e.shootTimer = 0;
+      }
+    }
+
+    for(let j = playerBullets.length-1; j>=0; j--){
+      let b = playerBullets[j];
+      if(Math.hypot(b.x-e.x,b.y-e.y) < e.size+b.size){
+        e.hp -= 1;
+        playerBullets.splice(j,1);
+        if(e.hp <= 0) {
+          enemies.splice(i,1);
+          break;
+        }
+      }
+    }
+  }
+
+  camera.x += (player.x - canvas.width/2 - camera.x) * camera.smooth;
+  camera.y += (player.y - canvas.height/2 - camera.y) * camera.smooth;
+}
+
+function render() {
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  if(!gameMode.gameStarted) return;
+  
+  ctx.save();
+  ctx.translate(-camera.x,-camera.y);
+  obstacles.forEach(o=>{ctx.fillStyle=o.color;ctx.fillRect(o.x,o.y,o.w,o.h);});
+  enemies.forEach(e=>{ctx.fillStyle=e.color;ctx.beginPath();ctx.arc(e.x,e.y,e.size,0,Math.PI*2);ctx.fill();});
+  playerBullets.forEach(b=>{ctx.fillStyle=b.color;ctx.beginPath();ctx.arc(b.x,b.y,b.size,0,Math.PI*2);ctx.fill();});
+  enemyBullets.forEach(b=>{ctx.fillStyle=b.color;ctx.beginPath();ctx.arc(b.x,b.y,b.size,0,Math.PI*2);ctx.fill();});
+  ctx.fillStyle=player.color;
+  ctx.beginPath();
+  ctx.arc(player.x,player.y,player.size,0,Math.PI*2);ctx.fill();
+  ctx.restore();
+  
+  renderGun();
+  renderMeleeRange();
+}
+
+function loop(){
+  render();
+  update();
+  requestAnimationFrame(loop);
+}
+
+spawnObstacles();
+loop();
+</script>
+</body>
+</html>
